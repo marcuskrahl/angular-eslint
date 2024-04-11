@@ -1,4 +1,4 @@
-import type { TmplAstElement } from '@angular-eslint/bundled-angular-compiler';
+import type { AST, TmplAstElement } from '@angular-eslint/bundled-angular-compiler';
 import {
   createESLintRule,
   getTemplateParserServices,
@@ -32,6 +32,9 @@ const DEFAULT_OPTIONS: Options[0] = {
   controlComponents: DEFAULT_CONTROL_COMPONENTS,
   labelComponents: DEFAULT_LABEL_COMPONENTS,
 };
+function filterUndefined<T>(value: T | undefined | null): value is T {
+  return value !== undefined && value !== null
+}
 
 export default createESLintRule<Options, MessageIds>({
   name: RULE_NAME,
@@ -91,36 +94,51 @@ export default createESLintRule<Options, MessageIds>({
     const labelSelectors = allLabelComponents.map(({ selector }) => selector);
     const labelComponentsPattern = toPattern(labelSelectors);
 
+    let inputItems: TmplAstElement[] = []
+    let labelItems: TmplAstElement[] = []
+
     return {
-      [`Element$1[name=${labelComponentsPattern}]`](node: TmplAstElement) {
-        const element = allLabelComponents.find(
-          ({ selector }) => selector === node.name,
-        );
-
-        if (!element) return;
-
-        const attributesInputs: ReadonlySet<string> = new Set(
-          [...node.attributes, ...node.inputs].map(({ name }) => name),
-        );
-        const hasInput = element.inputs?.some((input) =>
-          attributesInputs.has(input),
-        );
-
-        if (hasInput || hasControlComponentIn(allControlComponents, node)) {
-          return;
+      [`Element$1`](node: TmplAstElement) {
+        if (allControlComponents.has(node.name)) {
+          inputItems.push(node)
         }
+      },
+      [`Element$1[name=${labelComponentsPattern}]`](node: TmplAstElement) {
+        labelItems.push(node)
+      },
+      ASTWithSource() {
+        for (let node of labelItems) {
+          const element = allLabelComponents.find(
+            ({ selector }) => selector === node.name,
+          );
 
-        const loc = parserServices.convertNodeSourceSpanToLoc(node.sourceSpan);
+          if (!element) return;
 
-        context.report({
-          loc,
-          messageId: 'accessibilityLabelHasAssociatedControl',
-        });
+
+          const attributesInputs: ReadonlyMap<string, string | AST> = new Map<string, string | AST>([...node.attributes, ...node.inputs].map(({ name, value }) => [name, value]))
+          const inputValues = (element.inputs?.map((input) =>
+            attributesInputs.get(input)
+          ) ?? []).filter(filterUndefined)
+          let hasFor = inputValues.length > 0
+          if (hasFor) {
+            const value = inputValues[0]
+            hasFor = hasControlComponentWithId(inputItems, value)
+          }
+          if (hasFor || hasControlComponentIn(allControlComponents, node)) {
+            return;
+          }
+          const loc = parserServices.convertNodeSourceSpanToLoc(node.sourceSpan);
+          context.report({
+            loc,
+            messageId: 'accessibilityLabelHasAssociatedControl',
+          });
+        }
+        labelItems = []
+        inputItems = []
       },
     };
   },
 });
-
 function hasControlComponentIn(
   controlComponents: ReadonlySet<string>,
   element: TmplAstElement,
@@ -130,6 +148,13 @@ function hasControlComponentIn(
       isChildNodeOf(element, controlComponent),
     ),
   );
+}
+
+
+function hasControlComponentWithId(controlComponents: TmplAstElement[], id: string | AST) {
+  return Boolean([...controlComponents].some((node) => {
+    return !![...node.attributes, ...node.inputs].find(input => input.name === 'id' && input.value === id)
+  }));
 }
 
 function toPattern(value: readonly unknown[]): RegExp {
